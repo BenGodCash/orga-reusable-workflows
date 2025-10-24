@@ -1,4 +1,4 @@
-name: Security SAST scan (Detect vulnerabilities)
+name: Reusable Security SAST scan (Detect vulnerabilities)
 
 on:
   workflow_call
@@ -12,7 +12,26 @@ jobs:
       security-events: write
       actions: read
 
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: .
+        env:
+          PYTHONIOENCODING: utf-8
+          LC_ALL: C.UTF-8
+          LANG: C.UTF-8
+
     steps:
+
+      - name: 🔧 Force PowerShell UTF-8 globally
+        shell: pwsh
+        run: |
+          chcp 65001 | Out-Null
+          $OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          [System.Console]::InputEncoding = [System.Text.Encoding]::UTF8
+
+      - name: 🧪 List files 1
+        run: dir
 
       - name: 📥 Checkout du code
         uses: actions/checkout@v4
@@ -20,53 +39,121 @@ jobs:
       - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: 3.11
 
-      - name: 📦 Installation Semgrep
-        shell: pwsh
+      - name: 📦 Install semgrep
         run: |
           python -m pip install --upgrade pip
           pip install semgrep
+          semgrep --version
 
-      - name: 🚀 Analyse Semgrep + Génération SARIF
+      - name: 📦 Install jq if missing
         shell: pwsh
         run: |
-          Set-Location $env:GITHUB_WORKSPACE
-
-          # Force Python UTF-8 globally (bien plus fiable que PYTHONIOENCODING seul)
-          setx PYTHONUTF8 1 | Out-Null
-          $env:PYTHONUTF8 = "1"
-
-          # Exécuter Semgrep en mode silencieux pour éviter les erreurs d'encodage console Windows
-          semgrep --config auto --sarif --output semgrep-report.sarif . --quiet 2>$null
-
-          if (-Not (Test-Path "semgrep-report.sarif")) {
-            Write-Host "❌ ERREUR: semgrep-report.sarif n'a PAS été généré."
-            exit 1
+          if (-not (Get-Command jq -ErrorAction SilentlyContinue)) {
+            choco install jq -y
           }
 
-          # Analyse SARIF
-          $json = Get-Content semgrep-report.sarif -Raw -Encoding UTF8 | ConvertFrom-Json
-          $vulnCount = 0
-          if ($json.runs.Count -gt 0 -and $json.runs[0].psobject.Properties.Name -contains 'results') {
-            $vulnCount = $json.runs[0].results.Count
-          }
+      - name: 🧪 List files 2
+        run: dir
 
-          Add-Content $env:GITHUB_ENV "VULN_COUNT=$vulnCount"
-          Write-Host "Vulnérabilités détectées : $vulnCount"
+      - name: 🆔 Generate unique random ID
+        shell: pwsh
+        run: |
+          $rand = -join ((65..90 + 97..122 + 48..57) | Get-Random -Count 30 | ForEach-Object {[char]$_})
+          Add-Content -Encoding UTF8 $env:GITHUB_ENV "UNIQ_STR=$rand"
 
-      - name: ⬆️ Upload SARIF vers GitHub Advanced Security
+      - name: 🫙 Store Perso Git URL
+        shell: pwsh
+        run: Add-Content -Encoding UTF8 $env:GITHUB_ENV "PERSO_GIT=https://github.com/Naim-Aouaichia/"
+
+      - name: 🚀 Run semgrep INFO
+        shell: pwsh
+        run: |
+          semgrep --config=auto --encoding=utf-8 . `
+            --sarif --sarif-output="output-$env:UNIQ_STR-info.json" --severity=INFO `
+            --exclude-dir=node_modules --exclude-pattern="*.png" --exclude-pattern="*.jpg" --exclude-pattern="*.min.js"
+          
+          if (Test-Path "output-$env:UNIQ_STR-info.json") {
+            jq '.runs[].results[] |= (.properties["security-severity"] = "1.0")' `
+              "output-$env:UNIQ_STR-info.json" | Set-Content -Encoding utf8 "output-$env:UNIQ_STR-info.sarif"
+          } else { Write-Host "INFO SARIF not generated, skipping"; exit 1 }
+
+      - name: 🚀 Run semgrep WARNING
+        shell: pwsh
+        run: |
+          semgrep --config=auto --encoding=utf-8 . `
+            --sarif --sarif-output="output-$env:UNIQ_STR-warning.json" --severity=WARNING `
+            --exclude-dir=node_modules --exclude-pattern="*.png" --exclude-pattern="*.jpg" --exclude-pattern="*.min.js"
+          
+          if (Test-Path "output-$env:UNIQ_STR-warning.json") {
+            jq '.runs[].results[] |= (.properties["security-severity"] = "5.0")' `
+              "output-$env:UNIQ_STR-warning.json" | Set-Content -Encoding utf8 "output-$env:UNIQ_STR-warning.sarif"
+          } else { Write-Host "WARNING SARIF not generated, skipping"; exit 1 }
+
+      - name: 🚀 Run semgrep ERROR
+        shell: pwsh
+        run: |
+          semgrep --config=auto --encoding=utf-8 . `
+            --sarif --sarif-output="output-$env:UNIQ_STR-error.json" --severity=ERROR `
+            --exclude-dir=node_modules --exclude-pattern="*.png" --exclude-pattern="*.jpg" --exclude-pattern="*.min.js"
+          
+          if (Test-Path "output-$env:UNIQ_STR-error.json") {
+            jq '.runs[].results[] |= (.properties["security-severity"] = "7.0")' `
+              "output-$env:UNIQ_STR-error.json" | Set-Content -Encoding utf8 "output-$env:UNIQ_STR-error.sarif"
+          } else { Write-Host "ERROR SARIF not generated, skipping"; exit 1 }
+
+      - name: 🔗 Aggregate SARIF
+        shell: pwsh
+        run: |
+          jq -s '{
+            version: (.[0].version),
+            runs: [
+              {
+                invocations: (map(.runs[].invocations) | add),
+                results: (map(.runs[].results) | add),
+                tool: {
+                  driver: {
+                    name: (.[0].runs[0].tool.driver.name),
+                    rules: (map(.runs[].tool.driver.rules) | add),
+                    semanticVersion: (.[0].runs[0].tool.driver.semanticVersion)
+                  }
+                }
+              }
+            ],
+            "$schema": (.[0]."$schema")
+          }' "output-$env:UNIQ_STR-"*.sarif | Set-Content -Encoding utf8 "semgrep-report-temp.sarif"
+
+      - name: 💾 Normalize SARIF for GitHub Security
+        shell: pwsh
+        run: |
+          jq '.runs[0].tool.driver.name = "Semgrep"' semgrep-report-temp.sarif | Set-Content -Encoding utf8 semgrep-report-temp-temp.sarif
+          jq '.runs[0].tool.driver.rules |= map(
+            if .defaultConfiguration.level == "note" then .properties.severity = "MEDIUM"
+            elif .defaultConfiguration.level == "warning" then .properties.severity = "HIGH"
+            elif .defaultConfiguration.level == "error" then .properties.severity = "CRITICAL"
+            else . end
+          )' semgrep-report-temp-temp.sarif | Set-Content -Encoding utf8 semgrep-report-temp.sarif
+          jq '.runs[0].tool.driver.rules |= map(del(.defaultConfiguration))' semgrep-report-temp.sarif | Set-Content -Encoding utf8 semgrep-report.sarif
+          Add-Content -Encoding UTF8 $env:GITHUB_OUTPUT "tab_security_github=$env:PERSO_GIT${{ github.event.repository.name }}/security/code-scanning"
+
+      - name: ⬆️ Upload SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep-report.sarif
           category: semgrep-sast-analysis
+          ref: ${{ github.ref }}
+          sha: ${{ github.sha }}
 
-      - name: ✅ Vérification du résultat
+      - name: 🔄 Count vulnerabilities
         shell: pwsh
         run: |
-          $v = [int]$env:VULN_COUNT
-          if ($v -gt 0) {
-            Write-Host "❌ $v vulnérabilités détectées. CI bloquée."
-            exit 1
-          }
-          Write-Host "✅ Aucune vulnérabilité détectée. CI validée."
+          $count = (jq '.runs[0].results | length' semgrep-report.sarif)
+          Add-Content -Encoding UTF8 $env:GITHUB_ENV "VULN_COUNT=$count"
+          Write-Host "Nombre de vulnérabilités : $count"
+
+      - name: ✅ Fail or pass pipeline
+        shell: pwsh
+        run: |
+          if ($env:VULN_COUNT -gt 0) { exit 1 }
+          else { Write-Host "✅ Aucune vulnérabilité détectée" }
