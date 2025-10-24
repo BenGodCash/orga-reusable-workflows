@@ -65,7 +65,7 @@ jobs:
 
       - name: 🫙 Store Perso Git URL
         shell: pwsh
-        run: Add-Content -Encoding UTF8 $env:GITHUB_ENV "PERSO_GIT=https://github.com/Naim-Aouaichia/"
+        run: Add-Content -Encoding UTF8 $env:GITHUB_ENV "PERSO_GIT=https://github.com/BenGod1/"
 
       - name: 🚀 Run semgrep INFO
         shell: pwsh
